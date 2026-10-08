@@ -52,8 +52,11 @@ def validate_price_updates(df: pd.DataFrame, known_product_ids: set[int] | None 
     dup_exact = int(df.duplicated().sum())
     if dup_exact:
         issues.append(Issue("exact_duplicate", dup_exact))
-    dup_key = int(df.duplicated(subset=["product_id", "effective_date"], keep=False).sum())
-    if dup_key > dup_exact:
+    # exact duplicates are removed first, so only real conflicts (same key,
+    # different values) are counted here
+    deduped = df.drop_duplicates()
+    dup_key = int(deduped.duplicated(subset=["product_id", "effective_date"], keep=False).sum())
+    if dup_key:
         issues.append(Issue("conflicting_duplicate_key", dup_key, "same product_id + effective_date"))
 
     if known_product_ids is not None:

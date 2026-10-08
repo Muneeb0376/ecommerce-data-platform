@@ -219,7 +219,9 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+# ---- project specific ----
 data/raw/fx_rates_*.json
+data/staging/
 
 airflow/logs/
 
