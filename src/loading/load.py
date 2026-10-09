@@ -53,8 +53,13 @@ def load_rejected(conn, df: pd.DataFrame, source: str, run_id: str) -> int:
         (source, r["reject_reason"], json.dumps(r.drop("reject_reason").to_dict(), default=str), run_id)
         for _, r in df.iterrows()
     ]
-    if rows:
-        with conn.cursor() as cur:
+    with conn.cursor() as cur:
+        # idempotent: a retry of the same run replaces its own rejects
+        cur.execute(
+            "DELETE FROM etl_rejected_rows WHERE run_id = %s AND source = %s",
+            (run_id, source),
+        )
+        if rows:
             cur.executemany(
                 "INSERT INTO etl_rejected_rows (source, reject_reason, raw_row, run_id) "
                 "VALUES (%s, %s, %s::jsonb, %s)",
