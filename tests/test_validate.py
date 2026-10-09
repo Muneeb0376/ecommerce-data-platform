@@ -1,117 +1,167 @@
-"""VALIDATE step: find problems, never change data.
-
-Every check returns a list of Issue objects so the pipeline can report them
-and decide whether to continue or stop.
-"""
-from dataclasses import dataclass
-
 import pandas as pd
 
-VALID_ORDER_STATUSES = {"pending", "paid", "shipped", "delivered", "cancelled", "returned"}
-REQUIRED_PRICE_COLUMNS = ["product_id", "new_price", "currency", "effective_date"]
+from src.transformation.validate import (
+    Issue,
+    run_db_checks,
+    validate_fx_rates,
+    validate_price_updates,
+)
+
+KNOWN = {1, 2, 3}
 
 
-@dataclass
-class Issue:
-    check: str
-    count: int
-    detail: str = ""
-
-    def __str__(self) -> str:
-        return f"[{self.check}] {self.count} row(s) {self.detail}".strip()
+def price_df(rows):
+    cols = ["product_id", "new_price", "currency", "effective_date"]
+    return pd.DataFrame(rows, columns=cols)
 
 
-# ---------- CSV: product price updates ----------
-
-def validate_price_updates(df: pd.DataFrame, known_product_ids: set[int] | None = None) -> list[Issue]:
-    missing = [c for c in REQUIRED_PRICE_COLUMNS if c not in df.columns]
-    if missing:
-        # structural problem: no point running the other checks
-        return [Issue("missing_columns", len(missing), str(missing))]
-
-    issues: list[Issue] = []
-
-    for col in REQUIRED_PRICE_COLUMNS:
-        n = int(df[col].isna().sum())
-        if n:
-            issues.append(Issue("null_value", n, f"in column '{col}'"))
-
-    price = pd.to_numeric(df["new_price"], errors="coerce")
-    not_numeric = int((price.isna() & df["new_price"].notna()).sum())
-    if not_numeric:
-        issues.append(Issue("non_numeric_price", not_numeric))
-    negative = int((price <= 0).sum())
-    if negative:
-        issues.append(Issue("non_positive_price", negative))
-
-    dates = pd.to_datetime(df["effective_date"], errors="coerce")
-    bad_dates = int((dates.isna() & df["effective_date"].notna()).sum())
-    if bad_dates:
-        issues.append(Issue("bad_date", bad_dates))
-
-    dup_exact = int(df.duplicated().sum())
-    if dup_exact:
-        issues.append(Issue("exact_duplicate", dup_exact))
-    # exact duplicates are removed first, so only real conflicts (same key,
-    # different values) are counted here
-    deduped = df.drop_duplicates()
-    dup_key = int(deduped.duplicated(subset=["product_id", "effective_date"], keep=False).sum())
-    if dup_key:
-        issues.append(Issue("conflicting_duplicate_key", dup_key, "same product_id + effective_date"))
-
-    if known_product_ids is not None:
-        ids = pd.to_numeric(df["product_id"], errors="coerce")
-        unknown = int((~ids.isin(known_product_ids) & ids.notna()).sum())
-        if unknown:
-            issues.append(Issue("unknown_product_id", unknown))
-
-    return issues
+def checks(issues):
+    return [i.check for i in issues]
 
 
-# ---------- API: currency rates ----------
+# ---------- price updates ----------
 
-def validate_fx_rates(df: pd.DataFrame) -> list[Issue]:
-    issues: list[Issue] = []
-    if df.empty:
-        return [Issue("empty_fx_response", 0)]
-    bad = int((~(df["rate"] > 0)).sum())
-    if bad:
-        issues.append(Issue("non_positive_rate", bad))
-    dup = int(df.duplicated(subset=["base_currency", "currency", "rate_date"]).sum())
-    if dup:
-        issues.append(Issue("duplicate_rate", dup))
-    if "USD" not in set(df["currency"]):
-        issues.append(Issue("missing_usd", 1))
-    return issues
+def test_clean_price_data_has_no_issues():
+    df = price_df([(1, 10.0, "USD", "2026-01-01"), (2, 5.0, "USD", "2026-01-01")])
+    assert validate_price_updates(df, KNOWN) == []
 
 
-# ---------- Database data-quality checks (SQL based) ----------
-
-DB_CHECKS = {
-    "orders_invalid_status": (
-        "SELECT COUNT(*) FROM orders WHERE status <> ALL(%(statuses)s)",
-        {"statuses": sorted(VALID_ORDER_STATUSES)},
-    ),
-    "orders_null_user": ("SELECT COUNT(*) FROM orders WHERE user_id IS NULL", {}),
-    "orders_negative_total": ("SELECT COUNT(*) FROM orders WHERE total_amount < 0", {}),
-    "products_non_positive_price": ("SELECT COUNT(*) FROM products WHERE price <= 0", {}),
-    "duplicate_user_email": (
-        "SELECT COUNT(*) FROM (SELECT email FROM users GROUP BY email HAVING COUNT(*) > 1) t",
-        {},
-    ),
-    "orphan_order_items": (
-        "SELECT COUNT(*) FROM order_items oi LEFT JOIN orders o USING (order_id) WHERE o.order_id IS NULL",
-        {},
-    ),
-}
+def test_missing_columns_stops_other_checks():
+    df = pd.DataFrame({"product_id": [1]})
+    issues = validate_price_updates(df, KNOWN)
+    assert checks(issues) == ["missing_columns"]
+    assert issues[0].count == 3
 
 
-def run_db_checks(conn) -> list[Issue]:
-    issues: list[Issue] = []
-    with conn.cursor() as cur:
-        for name, (sql, params) in DB_CHECKS.items():
-            cur.execute(sql, params)
-            n = cur.fetchone()[0]
-            if n:
-                issues.append(Issue(name, n))
-    return issues
+def test_null_values_are_counted_per_column():
+    df = price_df([(1, None, "USD", "2026-01-01"), (2, 5.0, None, "2026-01-01")])
+    issues = validate_price_updates(df, KNOWN)
+    assert checks(issues).count("null_value") == 2
+
+
+def test_non_numeric_price():
+    df = price_df([(1, "abc", "USD", "2026-01-01")])
+    assert "non_numeric_price" in checks(validate_price_updates(df, KNOWN))
+
+
+def test_non_positive_price():
+    df = price_df([(1, 0, "USD", "2026-01-01"), (2, -3, "USD", "2026-01-01")])
+    issue = next(i for i in validate_price_updates(df, KNOWN) if i.check == "non_positive_price")
+    assert issue.count == 2
+
+
+def test_bad_date():
+    df = price_df([(1, 10.0, "USD", "not-a-date")])
+    assert "bad_date" in checks(validate_price_updates(df, KNOWN))
+
+
+def test_exact_duplicate_is_not_a_conflict():
+    row = (1, 10.0, "USD", "2026-01-01")
+    found = checks(validate_price_updates(price_df([row, row]), KNOWN))
+    assert "exact_duplicate" in found
+    assert "conflicting_duplicate_key" not in found
+
+
+def test_conflicting_duplicate_key():
+    df = price_df([(1, 10.0, "USD", "2026-01-01"), (1, 12.0, "USD", "2026-01-01")])
+    issue = next(i for i in validate_price_updates(df, KNOWN) if i.check == "conflicting_duplicate_key")
+    assert issue.count == 2
+
+
+def test_unknown_product_id():
+    df = price_df([(999, 10.0, "USD", "2026-01-01")])
+    assert "unknown_product_id" in checks(validate_price_updates(df, KNOWN))
+
+
+def test_unknown_product_check_skipped_when_ids_not_given():
+    df = price_df([(999, 10.0, "USD", "2026-01-01")])
+    assert validate_price_updates(df) == []
+
+
+def test_validate_never_changes_the_data():
+    df = price_df([(1, "abc", "usd ", "2026-01-01")])
+    before = df.copy()
+    validate_price_updates(df, KNOWN)
+    pd.testing.assert_frame_equal(df, before)
+
+
+# ---------- fx rates ----------
+
+def fx_df(rows):
+    return pd.DataFrame(rows, columns=["base_currency", "currency", "rate", "rate_date"])
+
+
+def test_valid_fx_rates():
+    df = fx_df([("USD", "USD", 1.0, "2026-01-01"), ("USD", "EUR", 0.9, "2026-01-01")])
+    assert validate_fx_rates(df) == []
+
+
+def test_empty_fx_response():
+    assert checks(validate_fx_rates(fx_df([]))) == ["empty_fx_response"]
+
+
+def test_non_positive_fx_rate():
+    df = fx_df([("USD", "USD", 1.0, "2026-01-01"), ("USD", "EUR", 0, "2026-01-01")])
+    assert "non_positive_rate" in checks(validate_fx_rates(df))
+
+
+def test_duplicate_fx_rate():
+    df = fx_df([("USD", "USD", 1.0, "2026-01-01"), ("USD", "USD", 1.0, "2026-01-01")])
+    assert "duplicate_rate" in checks(validate_fx_rates(df))
+
+
+def test_missing_usd():
+    df = fx_df([("USD", "EUR", 0.9, "2026-01-01")])
+    assert "missing_usd" in checks(validate_fx_rates(df))
+
+
+# ---------- Issue ----------
+
+def test_issue_string_format():
+    assert str(Issue("bad_date", 2)) == "[bad_date] 2 row(s)"
+    assert str(Issue("null_value", 1, "in column 'x'")) == "[null_value] 1 row(s) in column 'x'"
+
+
+# ---------- database checks (fake connection, no real DB needed) ----------
+
+class FakeCursor:
+    def __init__(self, counts):
+        self.counts = counts
+        self.calls = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        self.current = self.counts[self.calls]
+        self.calls += 1
+
+    def fetchone(self):
+        return (self.current,)
+
+
+class FakeConn:
+    def __init__(self, counts):
+        self.cur = FakeCursor(counts)
+
+    def cursor(self):
+        return self.cur
+
+
+def test_run_db_checks_reports_only_non_zero_counts():
+    from src.transformation.validate import DB_CHECKS
+
+    counts = [0] * len(DB_CHECKS)
+    counts[1] = 4
+    issues = run_db_checks(FakeConn(counts))
+    assert len(issues) == 1
+    assert issues[0].count == 4
+
+
+def test_run_db_checks_all_clean():
+    from src.transformation.validate import DB_CHECKS
+
+    assert run_db_checks(FakeConn([0] * len(DB_CHECKS))) == []
