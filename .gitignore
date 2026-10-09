@@ -227,3 +227,6 @@ airflow/logs/
 
 __pycache__/
 *.pyc
+.pytest_cache/
+__pycache__/
+.venv/
