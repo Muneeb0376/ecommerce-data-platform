@@ -3,3 +3,5 @@ psycopg[binary]
 python-dotenv
 pandas
 pytest
+boto3==1.43.111
+python-dotenv==1.2.4
