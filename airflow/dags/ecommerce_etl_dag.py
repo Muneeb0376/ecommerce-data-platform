@@ -1,6 +1,6 @@
 """Daily ETL, one Airflow task per step:
 
-    extract -> validate -> clean -> load -> db_checks
+    extract -> validate -> clean -> load -> upload_to_s3 -> db_checks
 
 Tasks pass data to each other through small pickle files in
 data/staging/<run_id>/ (DataFrames are too big/awkward for XCom).
@@ -81,7 +81,7 @@ default_args = {
 
 @dag(
     dag_id="ecommerce_etl",
-    description="Price updates + FX rates ETL into PostgreSQL",
+    description="Price updates + FX rates ETL into PostgreSQL and the S3 data lake",
     default_args=default_args,
     start_date=datetime(2026, 10, 1),
     schedule="@daily",
@@ -200,6 +200,35 @@ def ecommerce_etl():
         return {"prices": prices, "fx": fx, "rejected": rejected}
 
     @task
+    def upload_to_s3(load_result: dict, ts_nodash=None) -> dict:
+        """Copy this run's data to the S3 data lake (same run_id => same keys, so retries are safe)."""
+        _prepare()
+        from src.loading.s3 import build_key, get_client, upload_dataframe, upload_file
+
+        staging = _staging_dir(ts_nodash)
+        s3 = get_client()
+        uploaded = []
+
+        raw_csv = PROJECT_DIR / "data" / "raw" / SOURCE_NAME
+        if raw_csv.exists():
+            uploaded.append(
+                upload_file(raw_csv, build_key("raw", "price_updates", ts_nodash, SOURCE_NAME), client=s3)
+            )
+
+        for pkl, dataset, name in [
+            ("clean.pkl", "price_updates", "clean.csv"),
+            ("rejected.pkl", "price_updates_rejected", "rejected.csv"),
+            ("fx.pkl", "fx_rates", "fx_rates.csv"),
+        ]:
+            path = staging / pkl
+            if path.exists():
+                key = build_key("processed", dataset, ts_nodash, name)
+                uploaded.append(upload_dataframe(pd.read_pickle(path), key, client=s3))
+
+        log.info("uploaded %d files to S3: %s", len(uploaded), uploaded)
+        return {"files": len(uploaded)}
+
+    @task
     def db_checks(load_result: dict, ts_nodash=None, dag_run=None) -> None:
         _prepare()
         from src.loading.load import log_run
@@ -224,9 +253,10 @@ def ecommerce_etl():
     validated = validate()
     cleaned = clean()
     loaded = load()
+    uploaded = upload_to_s3(loaded)
     checked = db_checks(loaded)
 
-    extracted >> validated >> cleaned >> loaded >> checked
+    extracted >> validated >> cleaned >> loaded >> uploaded >> checked
 
 
 ecommerce_etl()
