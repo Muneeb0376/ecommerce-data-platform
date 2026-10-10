@@ -1,5 +1,7 @@
 # E-Commerce Data Platform
 
+![CI](https://github.com/Muneeb0376/ecommerce-data-platform/actions/workflows/ci.yml/badge.svg)
+
 A production-style batch data pipeline for an e-commerce domain: it ingests product price updates (CSV) and currency exchange rates (API), validates and cleans them, loads the trusted rows into PostgreSQL, and keeps every rejected row with a reason. The pipeline is orchestrated by Apache Airflow and runs fully in Docker.
 
 **Stack:** Python · pandas · PostgreSQL 17 · Apache Airflow · Docker Compose · pytest
