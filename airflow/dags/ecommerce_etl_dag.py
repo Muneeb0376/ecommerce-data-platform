@@ -1,6 +1,6 @@
 """Daily ETL, one Airflow task per step:
 
-    extract -> validate -> clean -> load -> upload_to_s3 -> db_checks
+    extract -> validate -> clean -> load -> upload_to_s3 -> export_tables_to_s3 -> db_checks
 
 Tasks pass data to each other through small pickle files in
 data/staging/<run_id>/ (DataFrames are too big/awkward for XCom).
@@ -81,7 +81,7 @@ default_args = {
 
 @dag(
     dag_id="ecommerce_etl",
-    description="Price updates + FX rates ETL into PostgreSQL and the S3 data lake",
+    description="Price updates + FX rates ETL into PostgreSQL, plus table exports to the S3 data lake",
     default_args=default_args,
     start_date=datetime(2026, 10, 1),
     schedule="@daily",
@@ -229,6 +229,16 @@ def ecommerce_etl():
         return {"files": len(uploaded)}
 
     @task
+    def export_tables_to_s3(load_result: dict, ts_nodash=None) -> dict:
+        """Snapshot the main database tables to S3 raw/ as Parquet (same run_id => same keys, so retries are safe)."""
+        _prepare()
+        from src.loading.export_to_s3 import export_all
+
+        counts = export_all(ts_nodash, _staging_dir(ts_nodash) / "export")
+        log.info("exported %d tables to S3: %s", len(counts), counts)
+        return counts
+
+    @task
     def db_checks(load_result: dict, ts_nodash=None, dag_run=None) -> None:
         _prepare()
         from src.loading.load import log_run
@@ -254,9 +264,10 @@ def ecommerce_etl():
     cleaned = clean()
     loaded = load()
     uploaded = upload_to_s3(loaded)
+    exported = export_tables_to_s3(loaded)
     checked = db_checks(loaded)
 
-    extracted >> validated >> cleaned >> loaded >> uploaded >> checked
+    extracted >> validated >> cleaned >> loaded >> uploaded >> exported >> checked
 
 
 ecommerce_etl()
