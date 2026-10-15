@@ -4,3 +4,4 @@ pandas
 pytest
 boto3==1.43.111
 pyarrow
+faker

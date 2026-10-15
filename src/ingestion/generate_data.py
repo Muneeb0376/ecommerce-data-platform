@@ -3,6 +3,13 @@
 Usage:
     python -m src.ingestion.generate_data --users 1000 --orders 5000 --events 20000
     python -m src.ingestion.generate_data --reset   # empty tables first
+
+Big data example (needs --reset: the order ids are assumed to start at 1):
+    python -m src.ingestion.generate_data --reset --users 100000 --sellers 500 \
+        --products 5000 --orders 1000000 --reviews 300000 --events 3000000
+
+Large tables are loaded with COPY, and orders are generated in chunks,
+so memory stays small even for millions of rows.
 """
 import argparse
 import os
@@ -23,6 +30,8 @@ COUNTRIES = ["Pakistan", "India", "UAE", "UK", "USA", "Canada", "Germany", "Saud
 PAY_METHODS = ["card", "cash_on_delivery", "bank_transfer", "wallet"]
 ORDER_STATUS = ["delivered", "shipped", "paid", "pending", "cancelled", "returned"]
 ORDER_WEIGHTS = [55, 15, 10, 8, 8, 4]
+
+ORDER_CHUNK = 50_000  # orders generated and loaded per round
 
 
 def connect():
@@ -45,6 +54,13 @@ def rand_date(days_back=365):
 def reset(cur):
     cur.execute("TRUNCATE events, reviews, payments, order_items, orders, "
                 "products, categories, sellers, users RESTART IDENTITY CASCADE")
+
+
+def copy_rows(cur, statement, rows):
+    """Bulk load an iterable of tuples with COPY (much faster than executemany)."""
+    with cur.copy(statement) as copy:
+        for row in rows:
+            copy.write_row(row)
 
 
 def main():
@@ -78,8 +94,8 @@ def main():
                 continue
             emails.add(email)
             users.append((fake.name(), email, random.choice(COUNTRIES), rand_date(900)))
-        cur.executemany(
-            "INSERT INTO users(name, email, country, created_at) VALUES (%s,%s,%s,%s)", users)
+        copy_rows(cur, "COPY users(name, email, country, created_at) FROM STDIN", users)
+        del users, emails
 
         prices = {}
         products = []
@@ -93,44 +109,49 @@ def main():
             "INSERT INTO products(seller_id, category_id, name, price, stock) "
             "VALUES (%s,%s,%s,%s,%s)", products)
 
-        orders, items, payments = [], [], []
-        for oid in range(1, a.orders + 1):
-            odate = rand_date(365)
-            status = random.choices(ORDER_STATUS, ORDER_WEIGHTS)[0]
-            total = 0
-            for pid in random.sample(range(1, a.products + 1), random.randint(1, 4)):
-                qty = random.randint(1, 3)
-                total += qty * prices[pid]
-                items.append((oid, pid, qty, prices[pid]))
-            total = round(total, 2)
-            orders.append((random.randint(1, a.users), odate, status, total))
-            if status == "pending":
-                pay_status, paid_at = "failed", None
-            elif status in ("cancelled", "returned"):
-                pay_status, paid_at = "refunded", odate + timedelta(minutes=5)
-            else:
-                pay_status, paid_at = "success", odate + timedelta(minutes=random.randint(1, 30))
-            payments.append((oid, random.choice(PAY_METHODS), total, pay_status, paid_at))
+        # orders, their items and payments: one chunk at a time.
+        # Orders are inserted in order, so the ids of a chunk are start..end.
+        for start in range(1, a.orders + 1, ORDER_CHUNK):
+            end = min(start + ORDER_CHUNK - 1, a.orders)
+            orders, items, payments = [], [], []
+            for oid in range(start, end + 1):
+                odate = rand_date(365)
+                status = random.choices(ORDER_STATUS, ORDER_WEIGHTS)[0]
+                total = 0
+                for pid in random.sample(range(1, a.products + 1), random.randint(1, 4)):
+                    qty = random.randint(1, 3)
+                    total += qty * prices[pid]
+                    items.append((oid, pid, qty, prices[pid]))
+                total = round(total, 2)
+                orders.append((random.randint(1, a.users), odate, status, total))
+                if status == "pending":
+                    pay_status, paid_at = "failed", None
+                elif status in ("cancelled", "returned"):
+                    pay_status, paid_at = "refunded", odate + timedelta(minutes=5)
+                else:
+                    pay_status, paid_at = "success", odate + timedelta(minutes=random.randint(1, 30))
+                payments.append((oid, random.choice(PAY_METHODS), total, pay_status, paid_at))
 
-        cur.executemany("INSERT INTO orders(user_id, order_date, status, total_amount) "
-                        "VALUES (%s,%s,%s,%s)", orders)
-        cur.executemany("INSERT INTO order_items(order_id, product_id, quantity, unit_price) "
-                        "VALUES (%s,%s,%s,%s)", items)
-        cur.executemany("INSERT INTO payments(order_id, method, amount, status, paid_at) "
-                        "VALUES (%s,%s,%s,%s,%s)", payments)
+            copy_rows(cur, "COPY orders(user_id, order_date, status, total_amount) FROM STDIN",
+                      orders)
+            copy_rows(cur, "COPY order_items(order_id, product_id, quantity, unit_price) FROM STDIN",
+                      items)
+            copy_rows(cur, "COPY payments(order_id, method, amount, status, paid_at) FROM STDIN",
+                      payments)
+            print(f"orders {end:>9} / {a.orders}", flush=True)
 
-        cur.executemany(
-            "INSERT INTO reviews(user_id, product_id, rating, review_date) VALUES (%s,%s,%s,%s)",
-            [(random.randint(1, a.users), random.randint(1, a.products),
+        copy_rows(
+            cur, "COPY reviews(user_id, product_id, rating, review_date) FROM STDIN",
+            ((random.randint(1, a.users), random.randint(1, a.products),
               random.choices([1, 2, 3, 4, 5], [5, 7, 15, 33, 40])[0], rand_date(365))
-             for _ in range(a.reviews)])
+             for _ in range(a.reviews)))
 
-        cur.executemany(
-            "INSERT INTO events(user_id, product_id, event_type, event_time) VALUES (%s,%s,%s,%s)",
-            [(random.randint(1, a.users), random.randint(1, a.products),
+        copy_rows(
+            cur, "COPY events(user_id, product_id, event_type, event_time) FROM STDIN",
+            ((random.randint(1, a.users), random.randint(1, a.products),
               random.choices(["view", "add_to_cart", "remove_from_cart", "purchase"],
                              [70, 15, 5, 10])[0], rand_date(90))
-             for _ in range(a.events)])
+             for _ in range(a.events)))
 
         conn.commit()
         for t in ["users", "sellers", "categories", "products", "orders",
