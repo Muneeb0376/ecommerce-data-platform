@@ -1,0 +1,18 @@
+# Run Spark jobs in a container (no Java needed on the host).
+# Usage:
+#   docker compose -f docker-compose.spark.yml build
+#   docker compose -f docker-compose.spark.yml run --rm spark /opt/spark/bin/spark-submit \
+#       --driver-memory 2g /opt/project/spark/jobs/daily_sales.py
+services:
+  spark:
+    build: ./docker/spark
+    image: ecom-spark:latest
+    container_name: ecom_spark
+    working_dir: /opt/project
+    environment:
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
+      - AWS_REGION=ap-southeast-2
+      - S3_BUCKET=ecommerce-data-lake-muneeb
+    volumes:
+      - ./spark:/opt/project/spark:ro
