@@ -8,7 +8,7 @@ REGION = os.environ.get("AWS_REGION", "ap-southeast-2")
 
 
 def get_spark(app_name: str) -> SparkSession:
-    return (
+    spark = (
         SparkSession.builder.appName(app_name)
         .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
         .config(
@@ -20,6 +20,8 @@ def get_spark(app_name: str) -> SparkSession:
         .config("spark.sql.shuffle.partitions", "16")
         .getOrCreate()
     )
+    spark.sparkContext.setLogLevel("WARN")  # hide the INFO noise, keep warnings and errors
+    return spark
 
 
 def _run_ids(spark, table: str) -> set:
