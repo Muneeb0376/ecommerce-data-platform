@@ -4,12 +4,13 @@ Usage:
     python -m src.ingestion.generate_data --users 1000 --orders 5000 --events 20000
     python -m src.ingestion.generate_data --reset   # empty tables first
 
-Big data example (needs --reset: the order ids are assumed to start at 1):
+Big data example (needs --reset: the ids are assumed to start at 1):
     python -m src.ingestion.generate_data --reset --users 100000 --sellers 500 \
         --products 5000 --orders 1000000 --reviews 300000 --events 3000000
 
 Large tables are loaded with COPY, and orders are generated in chunks,
 so memory stays small even for millions of rows.
+An order is never dated before its user's account was created.
 """
 import argparse
 import os
@@ -49,6 +50,14 @@ def rand_date(days_back=365):
     return datetime.now() - timedelta(
         days=random.randint(0, days_back),
         seconds=random.randint(0, 86399))
+
+
+def date_after(start, days_back=365):
+    """Random datetime between max(start, now - days_back) and now."""
+    now = datetime.now()
+    low = max(start, now - timedelta(days=days_back))
+    span = max(int((now - low).total_seconds()), 0)
+    return low + timedelta(seconds=random.randint(0, span))
 
 
 def reset(cur):
@@ -95,6 +104,8 @@ def main():
             emails.add(email)
             users.append((fake.name(), email, random.choice(COUNTRIES), rand_date(900)))
         copy_rows(cur, "COPY users(name, email, country, created_at) FROM STDIN", users)
+        # user_id is 1..N in insert order, so user_created[user_id - 1] is that user's signup time
+        user_created = [u[3] for u in users]
         del users, emails
 
         prices = {}
@@ -115,7 +126,8 @@ def main():
             end = min(start + ORDER_CHUNK - 1, a.orders)
             orders, items, payments = [], [], []
             for oid in range(start, end + 1):
-                odate = rand_date(365)
+                uid = random.randint(1, a.users)
+                odate = date_after(user_created[uid - 1], 365)  # never before the signup
                 status = random.choices(ORDER_STATUS, ORDER_WEIGHTS)[0]
                 total = 0
                 for pid in random.sample(range(1, a.products + 1), random.randint(1, 4)):
@@ -123,7 +135,7 @@ def main():
                     total += qty * prices[pid]
                     items.append((oid, pid, qty, prices[pid]))
                 total = round(total, 2)
-                orders.append((random.randint(1, a.users), odate, status, total))
+                orders.append((uid, odate, status, total))
                 if status == "pending":
                     pay_status, paid_at = "failed", None
                 elif status in ("cancelled", "returned"):
