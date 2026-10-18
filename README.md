@@ -121,7 +121,7 @@ docker compose -f docker-compose.spark.yml build
 docker compose -f docker-compose.spark.yml run --rm spark /opt/spark/bin/spark-submit --driver-memory 2g /opt/project/spark/jobs/daily_sales.py
 docker compose -f docker-compose.spark.yml run --rm spark /opt/spark/bin/spark-submit --driver-memory 2g /opt/project/spark/jobs/customer_metrics.py
 ```
-
+![Spark daily_sales output](docs/images/spark_daily_sales.png)
 ![S3 analytics zone](docs/images/s3_analytics.png)
 
 ## Project structure
