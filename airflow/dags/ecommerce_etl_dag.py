@@ -1,6 +1,8 @@
-"""Daily ETL, one Airflow task per step:
+"""Weekly ETL, one Airflow task per step:
 
     extract -> validate -> clean -> load -> upload_to_s3 -> export_tables_to_s3 -> db_checks
+                                                                  |
+                                                                  +-> spark_daily_sales -> spark_customer_metrics
 
 Tasks pass data to each other through small pickle files in
 data/staging/<run_id>/ (DataFrames are too big/awkward for XCom).
@@ -17,6 +19,7 @@ from pathlib import Path
 import pandas as pd
 from airflow.decorators import dag, task
 from airflow.models.param import Param
+from airflow.operators.bash import BashOperator
 
 PROJECT_DIR = Path("/opt/airflow/project")
 STAGING_ROOT = PROJECT_DIR / "data" / "staging"
@@ -81,10 +84,10 @@ default_args = {
 
 @dag(
     dag_id="ecommerce_etl",
-    description="Price updates + FX rates ETL into PostgreSQL, plus table exports to the S3 data lake",
+    description="Price updates + FX rates ETL into PostgreSQL, table exports to S3, Spark analytics jobs",
     default_args=default_args,
     start_date=datetime(2026, 10, 1),
-    schedule="@daily",
+    schedule="@weekly",
     catchup=False,
     max_active_runs=1,
     params={"skip_api": Param(False, type="boolean", description="Skip the currency API")},
@@ -267,7 +270,21 @@ def ecommerce_etl():
     exported = export_tables_to_s3(loaded)
     checked = db_checks(loaded)
 
+    # Spark jobs run one after the other (not in parallel) to keep Docker's memory usage low
+    spark_daily_sales = BashOperator(
+        task_id="spark_daily_sales",
+        bash_command="spark-submit --driver-memory 2g /opt/airflow/spark/jobs/daily_sales.py",
+        execution_timeout=timedelta(minutes=30),
+    )
+
+    spark_customer_metrics = BashOperator(
+        task_id="spark_customer_metrics",
+        bash_command="spark-submit --driver-memory 2g /opt/airflow/spark/jobs/customer_metrics.py",
+        execution_timeout=timedelta(minutes=30),
+    )
+
     extracted >> validated >> cleaned >> loaded >> uploaded >> exported >> checked
+    exported >> spark_daily_sales >> spark_customer_metrics
 
 
 ecommerce_etl()

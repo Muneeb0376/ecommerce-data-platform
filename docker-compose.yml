@@ -26,6 +26,7 @@ x-airflow-common: &airflow-common
     - ./src:/opt/airflow/project/src
     - ./data:/opt/airflow/project/data
     - ./sql:/opt/airflow/project/sql:ro
+    - ./spark:/opt/airflow/spark
   depends_on:
     airflow_db:
       condition: service_healthy
