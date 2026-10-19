@@ -10,7 +10,7 @@ Big data example (needs --reset: the ids are assumed to start at 1):
 
 Large tables are loaded with COPY, and orders are generated in chunks,
 so memory stays small even for millions of rows.
-An order is never dated before its user's account was created.
+Orders, reviews and events are never dated before their user's account was created.
 """
 import argparse
 import os
@@ -152,18 +152,21 @@ def main():
                       payments)
             print(f"orders {end:>9} / {a.orders}", flush=True)
 
+        # reviews and events: also never before the user's signup
         copy_rows(
             cur, "COPY reviews(user_id, product_id, rating, review_date) FROM STDIN",
-            ((random.randint(1, a.users), random.randint(1, a.products),
-              random.choices([1, 2, 3, 4, 5], [5, 7, 15, 33, 40])[0], rand_date(365))
-             for _ in range(a.reviews)))
+            ((uid, random.randint(1, a.products),
+              random.choices([1, 2, 3, 4, 5], [5, 7, 15, 33, 40])[0],
+              date_after(user_created[uid - 1], 365))
+             for uid in (random.randint(1, a.users) for _ in range(a.reviews))))
 
         copy_rows(
             cur, "COPY events(user_id, product_id, event_type, event_time) FROM STDIN",
-            ((random.randint(1, a.users), random.randint(1, a.products),
+            ((uid, random.randint(1, a.products),
               random.choices(["view", "add_to_cart", "remove_from_cart", "purchase"],
-                             [70, 15, 5, 10])[0], rand_date(90))
-             for _ in range(a.events)))
+                             [70, 15, 5, 10])[0],
+              date_after(user_created[uid - 1], 90))
+             for uid in (random.randint(1, a.users) for _ in range(a.events))))
 
         conn.commit()
         for t in ["users", "sellers", "categories", "products", "orders",
