@@ -42,6 +42,14 @@ Pipeline steps live in separate modules so each can be tested on its own:
 
 ![Power BI Dashboard](docs/images/dashboard.png)
 
+## Streaming (Kafka)
+
+Events flow from a Python producer into Kafka, and a consumer writes them to PostgreSQL.
+
+![Kafka topic](docs/images/kafka_ui_topic.png)
+
+![Kafka consumer group](docs/images/kafka_ui_consumers.png)
+
 ## Data quality and rejected rows
 
 Nothing is silently dropped. Every rejected row is stored in `etl_rejected_rows` with its `run_id` and a `reject_reason`:
