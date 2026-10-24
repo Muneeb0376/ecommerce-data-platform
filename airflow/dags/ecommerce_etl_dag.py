@@ -1,6 +1,6 @@
 """Weekly ETL, one Airflow task per step:
 
-    extract -> validate -> clean -> load -> upload_to_s3 -> export_tables_to_s3 -> db_checks
+    extract -> validate -> clean -> load -> upload_to_s3 -> export_tables_to_s3 -> db_checks -> build_warehouse
                                                                   |
                                                                   +-> spark_daily_sales -> spark_customer_metrics
 
@@ -262,6 +262,24 @@ def ecommerce_etl():
             log_run(conn, ts_nodash, started, "success", loaded, load_result["rejected"], message)
             conn.commit()
 
+    @task
+    def build_warehouse(ts_nodash=None) -> dict:
+        """Rebuild the star schema (warehouse.*) from the public tables."""
+        _prepare()
+        from src.utils.db import connect
+
+        sql_text = (PROJECT_DIR / "sql" / "warehouse" / "build_warehouse.sql").read_text(encoding="utf-8")
+
+        with connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql_text)
+                cur.execute("SELECT COUNT(*) FROM warehouse.fact_orders")
+                fact_rows = cur.fetchone()[0]
+            conn.commit()
+
+        log.info("warehouse rebuilt, fact_orders rows=%d", fact_rows)
+        return {"fact_rows": fact_rows}
+
     extracted = extract()
     validated = validate()
     cleaned = clean()
@@ -269,6 +287,7 @@ def ecommerce_etl():
     uploaded = upload_to_s3(loaded)
     exported = export_tables_to_s3(loaded)
     checked = db_checks(loaded)
+    warehouse = build_warehouse()
 
     # Spark jobs run one after the other (not in parallel) to keep Docker's memory usage low
     spark_daily_sales = BashOperator(
@@ -285,6 +304,7 @@ def ecommerce_etl():
 
     extracted >> validated >> cleaned >> loaded >> uploaded >> exported >> checked
     exported >> spark_daily_sales >> spark_customer_metrics
+    checked >> warehouse
 
 
 ecommerce_etl()
