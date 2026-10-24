@@ -38,6 +38,10 @@ Pipeline steps live in separate modules so each can be tested on its own:
 | Export | `src/loading/export_to_s3.py` | Streams every main table from PostgreSQL to S3 as Parquet, in chunks. |
 | Spark jobs | `spark/jobs/` | `daily_sales.py` and `customer_metrics.py` build the analytics datasets. |
 
+## Dashboard
+
+![Power BI Dashboard](docs/images/dashboard.png)
+
 ## Data quality and rejected rows
 
 Nothing is silently dropped. Every rejected row is stored in `etl_rejected_rows` with its `run_id` and a `reject_reason`:
